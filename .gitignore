@@ -1,3 +1,6 @@
+# RLMgw runtime storage
+.rlmgw/
+
 # MacOS
 .DS_Store
 
