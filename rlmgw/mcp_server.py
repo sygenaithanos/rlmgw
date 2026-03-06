@@ -162,3 +162,7 @@ def vllm_status() -> str:
     if model:
         return json.dumps({"status": "available", "model": model, "base_url": base_url})
     return json.dumps({"status": "unavailable", "model": None, "base_url": base_url})
+
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")

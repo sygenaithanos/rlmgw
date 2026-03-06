@@ -6,8 +6,7 @@
         "--directory", "${CLAUDE_PLUGIN_ROOT}",
         "run",
         "--extra", "mcp",
-        "mcp", "run",
-        "${CLAUDE_PLUGIN_ROOT}/rlmgw/mcp_server.py"
+        "python", "-m", "rlmgw.mcp_server"
       ],
       "env": {
         "RLMGW_REPO_ROOT": "${RLMGW_REPO_ROOT:-.}",
