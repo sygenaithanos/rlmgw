@@ -1,5 +1,4 @@
 ---
-name: rlmgw-config
 description: Configure RLMgw vLLM connection settings — set the upstream vLLM host, port, and context selection parameters.
 disable-model-invocation: true
 allowed-tools: Read, Edit, Bash(curl -s http://localhost:*)

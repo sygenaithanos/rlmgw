@@ -1,5 +1,4 @@
 ---
-name: rlmgw
 description: Use RLM Gateway to intelligently explore and select relevant code context from large repositories. Powered by a local vLLM instance with recursive language model exploration.
 allowed-tools: mcp__rlmgw__repo_select_context, mcp__rlmgw__repo_tree, mcp__rlmgw__repo_fingerprint, mcp__rlmgw__vllm_status, Read, Grep, Glob
 ---

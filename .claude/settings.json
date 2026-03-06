@@ -17,18 +17,5 @@
     "RLMGW_MAX_CONTEXT_PACK_CHARS": "12000",
     "RLMGW_MAX_INTERNAL_CALLS": "3",
     "RLMGW_USE_RLM_CONTEXT_SELECTION": "true"
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/hooks/session-start.sh"
-          }
-        ]
-      }
-    ]
   }
 }
