@@ -1,0 +1,88 @@
+"""Tests for MCP server tools."""
+
+import json
+from unittest.mock import patch
+
+import pytest
+
+from rlmgw.mcp_server import (
+    _discover_upstream_model,
+    _get_repo_tools,
+    repo_fingerprint,
+    repo_select_context,
+    repo_tree,
+    vllm_status,
+)
+
+
+def test_repo_tree():
+    """Test repo_tree returns valid directory structure."""
+    result = json.loads(repo_tree())
+    assert isinstance(result, dict)
+    # Should have rlmgw directory in this repo
+    assert "rlmgw" in result
+
+
+def test_repo_fingerprint():
+    """Test repo_fingerprint returns a non-empty string."""
+    result = repo_fingerprint()
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_repo_select_context_simple_fallback():
+    """Test repo_select_context falls back to simple keyword matching."""
+    # With no vLLM running, should fall back to simple selection
+    result = json.loads(repo_select_context("context pack builder"))
+    assert isinstance(result, dict)
+    assert "relevant_files" in result
+    assert "file_contents" in result
+    assert "repo_fingerprint" in result
+    assert "selection_mode" in result
+    # Should find files related to "context pack builder"
+    assert len(result["relevant_files"]) > 0
+
+
+def test_repo_select_context_max_chars():
+    """Test that max_chars parameter limits output size."""
+    result = json.loads(repo_select_context("test query", max_chars=500))
+    total_chars = sum(len(c) for c in result["file_contents"].values())
+    assert total_chars <= 1000  # Allow some overhead from truncation marker
+
+
+def test_discover_upstream_model_unavailable():
+    """Test model discovery when vLLM is not running."""
+    model = _discover_upstream_model("http://localhost:99999/v1")
+    assert model is None
+
+
+def test_discover_upstream_model_success():
+    """Test model discovery with a mocked vLLM response."""
+    mock_response = {"data": [{"id": "Qwen/Qwen3-Coder-Next", "object": "model"}]}
+
+    with patch("rlmgw.mcp_server.httpx.Client") as mock_client_cls:
+        mock_client = mock_client_cls.return_value.__enter__.return_value
+        mock_resp = mock_client.get.return_value
+        mock_resp.json.return_value = mock_response
+        mock_resp.raise_for_status.return_value = None
+
+        model = _discover_upstream_model("http://localhost:8000/v1")
+        assert model == "Qwen/Qwen3-Coder-Next"
+
+
+def test_vllm_status_unavailable():
+    """Test vllm_status when server is not running."""
+    result = json.loads(vllm_status())
+    assert result["status"] == "unavailable"
+    assert result["model"] is None
+
+
+def test_get_repo_tools_singleton():
+    """Test that _get_repo_tools returns a singleton."""
+    tools1 = _get_repo_tools()
+    tools2 = _get_repo_tools()
+    assert tools1 is tools2
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "rlmgw": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--extra", "mcp",
+        "mcp", "run",
+        "rlmgw/mcp_server.py"
+      ],
+      "env": {
+        "RLMGW_REPO_ROOT": ".",
+        "RLMGW_UPSTREAM_BASE_URL": "http://localhost:8000/v1"
+      }
+    }
+  }
+}
