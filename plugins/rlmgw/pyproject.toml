@@ -1,0 +1,22 @@
+[project]
+name = "rlmgw-plugin"
+version = "0.1.0"
+description = "Claude Code plugin for intelligent codebase context selection powered by RLM."
+requires-python = ">=3.11"
+dependencies = [
+    "rlm",
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.26.0",
+    "pydantic>=2.5.0",
+]
+
+[tool.uv.sources]
+rlm = { git = "https://github.com/sygenaithanos/rlmgw.git" }
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+packages = []

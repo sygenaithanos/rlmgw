@@ -9,14 +9,9 @@ import pytest
 import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLUGIN_DIR = os.path.join(ROOT, ".claude-plugin")
-
-
-def _resolve_path(relative_path: str) -> str:
-    """Resolve a plugin-relative path (starting with ./) to absolute."""
-    if relative_path.startswith("./"):
-        return os.path.join(ROOT, relative_path[2:])
-    return os.path.join(ROOT, relative_path)
+PLUGIN_DIR = os.path.join(ROOT, "plugins", "rlmgw")
+PLUGIN_MANIFEST_DIR = os.path.join(PLUGIN_DIR, ".claude-plugin")
+MARKETPLACE_DIR = os.path.join(ROOT, ".claude-plugin")
 
 
 # ---------------------------------------------------------------------------
@@ -25,11 +20,11 @@ def _resolve_path(relative_path: str) -> str:
 
 
 class TestPluginManifest:
-    """Validate .claude-plugin/plugin.json structure and references."""
+    """Validate plugins/rlmgw/.claude-plugin/plugin.json structure."""
 
     @pytest.fixture(autouse=True)
     def load_manifest(self):
-        with open(os.path.join(PLUGIN_DIR, "plugin.json")) as f:
+        with open(os.path.join(PLUGIN_MANIFEST_DIR, "plugin.json")) as f:
             self.manifest = json.load(f)
 
     def test_required_fields(self):
@@ -48,18 +43,6 @@ class TestPluginManifest:
         assert len(parts) == 3
         assert all(p.isdigit() for p in parts)
 
-    def test_skills_directory_exists(self):
-        skills_path = _resolve_path(self.manifest["skills"])
-        assert os.path.isdir(skills_path)
-
-    def test_hooks_file_exists(self):
-        hooks_path = _resolve_path(self.manifest["hooks"])
-        assert os.path.isfile(hooks_path)
-
-    def test_mcp_config_exists(self):
-        mcp_path = _resolve_path(self.manifest["mcpServers"])
-        assert os.path.isfile(mcp_path)
-
 
 # ---------------------------------------------------------------------------
 # Marketplace catalog
@@ -71,7 +54,7 @@ class TestMarketplace:
 
     @pytest.fixture(autouse=True)
     def load_marketplace(self):
-        with open(os.path.join(PLUGIN_DIR, "marketplace.json")) as f:
+        with open(os.path.join(MARKETPLACE_DIR, "marketplace.json")) as f:
             self.marketplace = json.load(f)
 
     def test_has_plugins_list(self):
@@ -82,25 +65,19 @@ class TestMarketplace:
     def test_plugin_entries_have_required_fields(self):
         for plugin in self.marketplace["plugins"]:
             assert "name" in plugin
-            assert "path" in plugin
+            assert "source" in plugin
             assert "description" in plugin
 
-    def test_plugin_paths_resolve_to_plugin_json(self):
+    def test_plugin_source_resolves_to_plugin_json(self):
         for plugin in self.marketplace["plugins"]:
-            path = plugin["path"]
-            if path == ".":
-                manifest = os.path.join(PLUGIN_DIR, "plugin.json")
-            else:
-                manifest = os.path.join(ROOT, path, ".claude-plugin", "plugin.json")
+            source = plugin["source"]
+            manifest = os.path.join(ROOT, source, ".claude-plugin", "plugin.json")
             assert os.path.isfile(manifest), f"No plugin.json at {manifest}"
 
     def test_marketplace_names_match_manifests(self):
         for plugin in self.marketplace["plugins"]:
-            path = plugin["path"]
-            if path == ".":
-                manifest_path = os.path.join(PLUGIN_DIR, "plugin.json")
-            else:
-                manifest_path = os.path.join(ROOT, path, ".claude-plugin", "plugin.json")
+            source = plugin["source"]
+            manifest_path = os.path.join(ROOT, source, ".claude-plugin", "plugin.json")
             with open(manifest_path) as f:
                 manifest = json.load(f)
             assert plugin["name"] == manifest["name"]
@@ -116,7 +93,7 @@ class TestSkills:
 
     @pytest.fixture(autouse=True)
     def load_skills(self):
-        skills_dir = os.path.join(ROOT, "skills")
+        skills_dir = os.path.join(PLUGIN_DIR, "skills")
         self.skills = {}
         for name in os.listdir(skills_dir):
             skill_file = os.path.join(skills_dir, name, "SKILL.md")
@@ -144,7 +121,6 @@ class TestSkills:
     def test_skills_have_allowed_tools(self):
         for name, content in self.skills.items():
             frontmatter = yaml.safe_load(content.split("---", 2)[1])
-            # allowed-tools is required unless disable-model-invocation is set
             if not frontmatter.get("disable-model-invocation"):
                 assert "allowed-tools" in frontmatter, f"Skill {name} missing allowed-tools"
 
@@ -172,7 +148,7 @@ class TestHooks:
 
     @pytest.fixture(autouse=True)
     def load_hooks(self):
-        with open(os.path.join(ROOT, "hooks", "hooks.json")) as f:
+        with open(os.path.join(PLUGIN_DIR, "hooks", "hooks.json")) as f:
             self.hooks_config = json.load(f)
 
     def test_hooks_json_has_hooks_key(self):
@@ -188,10 +164,8 @@ class TestHooks:
             for matcher in matchers:
                 for hook in matcher.get("hooks", []):
                     cmd = hook.get("command", "")
-                    # Extract script path (replace variable with root)
-                    resolved = cmd.replace("${CLAUDE_PLUGIN_ROOT}", ROOT)
+                    resolved = cmd.replace("${CLAUDE_PLUGIN_ROOT}", PLUGIN_DIR)
                     parts = resolved.split()
-                    # Find the script path (last arg that looks like a path)
                     script = None
                     for part in parts:
                         if "/" in part and not part.startswith("-"):
@@ -200,7 +174,7 @@ class TestHooks:
                         assert os.path.isfile(script), f"Hook script not found: {script}"
 
     def test_session_start_script_executable(self):
-        script = os.path.join(ROOT, "hooks", "session-start.sh")
+        script = os.path.join(PLUGIN_DIR, "hooks", "session-start.sh")
         assert os.path.isfile(script)
         mode = os.stat(script).st_mode
         assert mode & stat.S_IXUSR, "session-start.sh not executable"
@@ -208,7 +182,7 @@ class TestHooks:
     def test_session_start_script_runs(self):
         """Hook script should run without errors (vLLM unavailable is fine)."""
         result = subprocess.run(
-            ["bash", os.path.join(ROOT, "hooks", "session-start.sh")],
+            ["bash", os.path.join(PLUGIN_DIR, "hooks", "session-start.sh")],
             capture_output=True,
             text=True,
             timeout=10,
@@ -228,7 +202,7 @@ class TestMCPConfig:
 
     @pytest.fixture(autouse=True)
     def load_mcp(self):
-        with open(os.path.join(ROOT, ".mcp.json")) as f:
+        with open(os.path.join(PLUGIN_DIR, ".mcp.json")) as f:
             self.mcp = json.load(f)
 
     def test_has_mcp_servers_key(self):
@@ -257,20 +231,14 @@ class TestMCPConfig:
 
 
 class TestMCPProtocol:
-    """Test MCP server responds correctly over stdio JSON-RPC.
-
-    The MCP stdio transport uses newline-delimited JSON (one JSON object per line).
-    Notifications (no "id") may be interleaved with responses.
-    """
+    """Test MCP server responds correctly over stdio JSON-RPC."""
 
     SERVER_CMD = [
         "uv",
         "--directory",
-        ROOT,
+        PLUGIN_DIR,
         "run",
-        "--extra",
-        "mcp",
-        "python",
+        "python3",
         "-m",
         "rlmgw.mcp_server",
     ]
@@ -311,7 +279,6 @@ class TestMCPProtocol:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            # Skip notifications (no "id")
             if "id" not in msg:
                 continue
             if msg["id"] == req_id:
@@ -342,7 +309,6 @@ class TestMCPProtocol:
         resp = self._read_response(proc, req_id=1)
         assert resp is not None, "MCP server did not respond to initialize"
         assert "result" in resp
-        # Send initialized notification
         self._send(proc, "notifications/initialized")
         return proc, resp
 

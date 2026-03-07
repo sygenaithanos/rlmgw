@@ -3,13 +3,9 @@
   "version": "0.1.0",
   "description": "Intelligent codebase context selection powered by Recursive Language Models. Uses a local vLLM instance to recursively explore repositories and return the most relevant files for any query.",
   "author": {
-    "name": "rlmgw contributors",
-    "url": "https://github.com/mitkox/rlmgw"
+    "name": "rlmgw contributors"
   },
   "repository": "https://github.com/mitkox/rlmgw",
   "license": "MIT",
-  "keywords": ["rlm", "context-selection", "vllm", "codebase", "mcp"],
-  "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json"
+  "keywords": ["rlm", "context-selection", "vllm", "codebase", "mcp"]
 }

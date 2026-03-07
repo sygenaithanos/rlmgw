@@ -1,10 +1,19 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "rllm-tool",
+  "metadata": {
+    "description": "Intelligent codebase context selection powered by Recursive Language Models"
+  },
+  "owner": {
+    "name": "rlmgw contributors"
+  },
   "plugins": [
     {
       "name": "rlmgw",
-      "path": ".",
+      "source": "./plugins/rlmgw",
       "description": "Intelligent codebase context selection powered by Recursive Language Models. Uses a local vLLM instance to recursively explore repositories and return the most relevant files for any query.",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "category": "development"
     }
   ]
 }
