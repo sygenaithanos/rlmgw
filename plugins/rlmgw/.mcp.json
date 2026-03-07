@@ -5,7 +5,6 @@
       "args": [
         "--directory", "${CLAUDE_PLUGIN_ROOT}",
         "run",
-        "--extra", "mcp",
         "python3", "-m", "rlmgw.mcp_server"
       ],
       "env": {
