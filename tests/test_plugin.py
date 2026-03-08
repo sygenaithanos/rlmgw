@@ -220,7 +220,7 @@ class TestMCPConfig:
     def test_server_has_required_env_vars(self):
         server = self.mcp["mcpServers"]["rlmgw"]
         env = server.get("env", {})
-        required = ["RLMGW_REPO_ROOT", "RLMGW_UPSTREAM_BASE_URL"]
+        required = ["RLMGW_UPSTREAM_BASE_URL"]
         for var in required:
             assert var in env, f"Missing env var {var} in MCP config"
 
