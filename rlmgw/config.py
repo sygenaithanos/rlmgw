@@ -51,9 +51,13 @@ def load_config_from_env() -> RLMgwConfig:
     if "RLMGW_UPSTREAM_MODEL" in os.environ:
         config.upstream_model = os.environ["RLMGW_UPSTREAM_MODEL"]
 
-    # Repo settings
+    # Repo settings — resolve relative paths against PWD (not CWD) so that
+    # the plugin works when uv changes CWD to the plugin cache directory.
     if "RLMGW_REPO_ROOT" in os.environ:
         config.repo_root = os.environ["RLMGW_REPO_ROOT"]
+    if not os.path.isabs(config.repo_root):
+        base = os.environ.get("PWD", os.getcwd())
+        config.repo_root = os.path.join(base, config.repo_root)
 
     # Context pack settings
     if "RLMGW_MAX_CONTEXT_PACK_CHARS" in os.environ:
