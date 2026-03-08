@@ -217,12 +217,11 @@ class TestMCPConfig:
         args_str = " ".join(server["args"])
         assert "${CLAUDE_PLUGIN_ROOT}" in args_str
 
-    def test_server_has_required_env_vars(self):
+    def test_env_block_is_empty(self):
+        """Env vars must be inherited from parent process, not set in .mcp.json."""
         server = self.mcp["mcpServers"]["rlmgw"]
         env = server.get("env", {})
-        required = ["RLMGW_UPSTREAM_BASE_URL"]
-        for var in required:
-            assert var in env, f"Missing env var {var} in MCP config"
+        assert env == {}, f"MCP env block should be empty, got: {env}"
 
 
 # ---------------------------------------------------------------------------

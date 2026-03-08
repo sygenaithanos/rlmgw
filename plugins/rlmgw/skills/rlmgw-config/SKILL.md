@@ -1,30 +1,29 @@
 ---
 description: Configure RLMgw vLLM connection settings — set the upstream vLLM host, port, and context selection parameters.
 disable-model-invocation: true
-allowed-tools: Read, Edit, Bash(curl -s http://localhost:*)
+allowed-tools: Read, Edit, Bash(curl -s http://*)
 ---
 
 # RLMgw Configuration
 
 Help the user configure their vLLM and RLMgw settings.
 
-## Configuration files
+## Where settings live
 
-Settings are stored in two places:
+All RLMgw settings are environment variables stored in the `env` field of
+**`.claude/settings.json`** (the project-level shared settings file).
 
-1. **`.claude/settings.json`** (shared, committed) — team defaults
-2. **`.claude/settings.local.json`** (personal, gitignored) — local overrides
-
-The local file takes priority over the shared one.
+**Important:** Do NOT put RLMgw env vars in `.claude/settings.local.json` —
+the MCP server inherits env vars from the parent process, and only
+`settings.json` env vars are reliably passed through. Use `settings.local.json`
+only for non-env settings like permissions.
 
 ## Available settings
-
-All settings are environment variables in the `env` field:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RLMGW_UPSTREAM_BASE_URL` | `http://localhost:8000/v1` | vLLM server URL (OpenAI-compatible endpoint) |
-| `RLMGW_REPO_ROOT` | `.` | Target repository to analyze |
+| `RLMGW_REPO_ROOT` | `.` (current project) | Target repository to analyze |
 | `RLMGW_MAX_CONTEXT_PACK_CHARS` | `12000` | Max characters in context pack output |
 | `RLMGW_MAX_INTERNAL_CALLS` | `3` | Max RLM recursive iterations for context selection |
 | `RLMGW_USE_RLM_CONTEXT_SELECTION` | `true` | Use intelligent RLM selection (`true`) or simple keywords (`false`) |
@@ -36,25 +35,26 @@ $ARGUMENTS
 Based on the user's request:
 
 ### If they want to change the vLLM URL/port:
-1. Read `.claude/settings.local.json`
-2. Update `RLMGW_UPSTREAM_BASE_URL` to the new value (e.g., `http://192.168.1.100:8000/v1`)
+1. Read `.claude/settings.json`
+2. Update `RLMGW_UPSTREAM_BASE_URL` in the `env` field to the new value
 3. Write the updated file
 4. Test the connection: `curl -s <new_url>/models | python3 -m json.tool`
+5. Remind the user to restart Claude Code for changes to take effect
 
 ### If they want to see current config:
-1. Read `.claude/settings.json` (shared defaults)
-2. Read `.claude/settings.local.json` (local overrides)
-3. Show the effective configuration (local overrides shared)
-4. Test vLLM connectivity: `curl -s $RLMGW_UPSTREAM_BASE_URL/models`
+1. Read `.claude/settings.json`
+2. Show the current env settings
+3. Test vLLM connectivity: `curl -s <url>/models`
 
 ### If they want to change context selection settings:
 1. Read `.claude/settings.json`
 2. Update the relevant `env` field
 3. Write the file back
+4. Remind the user to restart Claude Code for changes to take effect
 
 ### If they want to point at a different repository:
-1. Update `RLMGW_REPO_ROOT` in `.claude/settings.local.json`
-2. The MCP server will pick up the new path on next tool call
+1. Set `RLMGW_REPO_ROOT` in `.claude/settings.json` env field
+2. Remind the user to restart Claude Code for changes to take effect
 
 ### Common configurations:
 
@@ -83,4 +83,4 @@ Based on the user's request:
 "RLMGW_USE_RLM_CONTEXT_SELECTION": "false"
 ```
 
-After changing settings, remind the user to restart Claude Code for the MCP server to pick up the new environment variables.
+After changing any setting, remind the user to restart Claude Code (`/exit` and relaunch) for the MCP server to pick up the new environment variables.
