@@ -57,7 +57,7 @@ def load_config_from_env() -> RLMgwConfig:
         config.repo_root = os.environ["RLMGW_REPO_ROOT"]
     if not os.path.isabs(config.repo_root):
         base = os.environ.get("PWD", os.getcwd())
-        config.repo_root = os.path.join(base, config.repo_root)
+        config.repo_root = os.path.normpath(os.path.join(base, config.repo_root))
 
     # Context pack settings
     if "RLMGW_MAX_CONTEXT_PACK_CHARS" in os.environ:
