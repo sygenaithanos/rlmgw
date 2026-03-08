@@ -8,7 +8,7 @@
         "python3", "-m", "rlmgw.mcp_server"
       ],
       "env": {
-        "RLMGW_REPO_ROOT": "${RLMGW_REPO_ROOT:-.}",
+        "RLMGW_REPO_ROOT": "${RLMGW_REPO_ROOT:-${PWD}}",
         "RLMGW_UPSTREAM_BASE_URL": "${RLMGW_UPSTREAM_BASE_URL:-http://localhost:8000/v1}",
         "RLMGW_MAX_CONTEXT_PACK_CHARS": "${RLMGW_MAX_CONTEXT_PACK_CHARS:-12000}",
         "RLMGW_MAX_INTERNAL_CALLS": "${RLMGW_MAX_INTERNAL_CALLS:-3}",
