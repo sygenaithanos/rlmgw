@@ -862,7 +862,7 @@ wheels = [
 [[package]]
 name = "rlm"
 version = "0.1.0"
-source = { git = "https://github.com/sygenaithanos/rlmgw.git#394012ec3496b2c17a6eaafbb9605946270ea501" }
+source = { git = "https://github.com/sygenaithanos/rlmgw.git#199b66de4e14d848e47f43950ba7d0e456db9a7e" }
 dependencies = [
     { name = "anthropic" },
     { name = "openai" },

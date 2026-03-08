@@ -54,7 +54,10 @@ def load_config_from_env() -> RLMgwConfig:
     # Repo settings — resolve relative paths against PWD (not CWD) so that
     # the plugin works when uv changes CWD to the plugin cache directory.
     if "RLMGW_REPO_ROOT" in os.environ:
-        config.repo_root = os.environ["RLMGW_REPO_ROOT"]
+        val = os.environ["RLMGW_REPO_ROOT"]
+        # Guard against unexpanded template variables (e.g. literal "${RLMGW_REPO_ROOT}")
+        if not (val.startswith("${") and val.endswith("}")):
+            config.repo_root = val
     if not os.path.isabs(config.repo_root):
         base = os.environ.get("PWD", os.getcwd())
         config.repo_root = os.path.normpath(os.path.join(base, config.repo_root))
