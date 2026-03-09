@@ -203,7 +203,7 @@ class RepoContextCollector:
 
         # Try git grep first for speed and .gitignore support
         try:
-            cmd = ["git", "grep", "-n", "--no-color", "-I", pattern]
+            cmd = ["git", "grep", "-E", "-n", "--no-color", "-I", pattern]
             result = subprocess.run(
                 cmd,
                 cwd=self.repo_root,

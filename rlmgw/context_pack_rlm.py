@@ -12,41 +12,45 @@ logger = logging.getLogger(__name__)
 
 
 # System prompt for context selection RLM
-CONTEXT_SELECTION_PROMPT = """You are a context selection assistant for a coding agent.
+CONTEXT_SELECTION_PROMPT = """You are a context selection assistant. Your task is to find the MOST RELEVANT source code files for a user's query.
 
-Your task is to analyze a user's query and select the MOST RELEVANT source code files from a codebase.
+You have access to repo tools in your REPL. You MUST use print() to see results — bare expressions are truncated.
 
-You have access to these tools in your REPL environment:
-- repo.list_files(extensions=None) -> List[str]  # List files, optionally filtered by extension
-- repo.grep(pattern: str, extensions=None) -> Dict[str, List[str]]  # Search for pattern
-- repo.read_file(path: str) -> str  # Read file contents
-- repo.get_tree() -> Dict  # Get directory structure
+Available tools:
+- repo.grep(pattern, extensions=None) -> Dict[str, List[str]]  # Search file contents
+- repo.list_files(extensions=None) -> List[str]  # List files by extension
+- repo.read_file(path) -> str  # Read a file
+- repo.get_tree() -> Dict  # Directory structure
 
-Your goal:
-1. Understand what the user is asking about
-2. Use the tools to explore and find relevant source code
-3. PRIORITIZE source code files (.py, .rs, .ts, .go, .java, etc.) over docs, configs, and generated files
-4. Select the MINIMAL set of files that provide high-signal context
-5. Return your selection as a JSON object wrapped in FINAL()
+IMPORTANT RULES:
+1. Always wrap tool calls in print() so you can see the output
+2. Search broadly — the codebase may use ANY language (.py, .rs, .ts, .go, .java, .cpp, etc.)
+3. If a grep returns empty for one extension, try without extensions or with different ones
+4. PRIORITIZE source code over docs, configs, tests, or generated output
+5. Do NOT reference or use the `context` variable — use repo.* tools instead
+6. When done, call FINAL() with your answer — not just bare JSON
 
-Strategy:
-- Start by grepping for key terms from the query
-- Read promising source files to verify relevance
-- Prefer implementation files over tests, docs, configs, or generated output
-- Skip markdown plans, migration docs, JSON output files, and settings files unless directly relevant
-
-When you want to execute Python code, wrap it in triple backticks with 'repl' language identifier:
+Example workflow:
 ```repl
-results = repo.grep("function_name")
+# First, find what languages are in the repo
+files = repo.list_files()
+print(f"Total files: {len(files)}, first 20: {files[:20]}")
+```
+```repl
+# Search for the key term
+results = repo.grep("my_function")
 print(results)
 ```
+```repl
+# Read a promising file
+content = repo.read_file("src/module.rs")
+print(content[:2000])
+```
 
-IMPORTANT: When you have completed your selection, you MUST provide your final answer using:
-FINAL({"relevant_files": ["path/to/file1.py", "path/to/file2.rs"], "reasoning": "Brief explanation"})
+When you have identified the relevant files, provide your answer:
+FINAL({"relevant_files": ["path/to/file1.rs", "path/to/file2.py"], "reasoning": "Brief explanation"})
 
-Do NOT just output JSON — wrap it in FINAL(). Do NOT use FINAL() until you have explored the codebase and are confident in your selection.
-
-Keep context COMPACT but HIGH-SIGNAL. Quality over quantity. Source code over documentation.
+Do NOT use FINAL() until you have explored the codebase. Keep selections COMPACT and HIGH-SIGNAL.
 """
 
 
@@ -70,14 +74,54 @@ class RLMContextPackBuilder:
         try:
             from rlm import RLM
 
-            # Build setup code that creates the repo tools in the environment
+            # Build setup code that creates auto-printing repo tool wrappers.
+            # The REPL's format_execution_result() only shows variable NAMES, not values.
+            # Without print(), the model cannot see any tool output. Auto-printing
+            # ensures results are always visible regardless of whether the model uses print().
+            #
+            # CONSTRAINTS from LocalREPL sandbox:
+            # 1. Variables starting with '_' are filtered out between exec() calls
+            # 2. __build_class__ is not in _SAFE_BUILTINS, so 'class' statements fail
+            # 3. Must use a SimpleNamespace or dict wrapper instead of a class
+            repo_root_escaped = str(self.repo_collector.repo_root).replace("'", "\\'")
             setup_code = f"""
 import sys
-sys.path.insert(0, '{str(self.repo_collector.repo_root)}')
+from types import SimpleNamespace
+sys.path.insert(0, '{repo_root_escaped}')
 
-# Import and setup repo context tools
 from rlmgw.repo_env import RepoContextTools
-repo = RepoContextTools('{str(self.repo_collector.repo_root)}')
+base_repo = RepoContextTools('{repo_root_escaped}')
+
+def repo_list_files(extensions=None):
+    result = base_repo.list_files(extensions)
+    print(f"Found {{len(result)}} files. First 30: {{result[:30]}}")
+    return result
+
+def repo_grep(pattern, extensions=None):
+    result = base_repo.grep(pattern, extensions)
+    print(f"grep '{{pattern}}' matched {{len(result)}} files: {{dict(list(result.items())[:15])}}")
+    return result
+
+def repo_read_file(path):
+    result = base_repo.read_file(path)
+    if result:
+        print(f"=== {{path}} ({{len(result)}} chars) ===")
+        print(result[:3000])
+    else:
+        print(f"File not found: {{path}}")
+    return result
+
+def repo_get_tree():
+    result = base_repo.get_tree()
+    print(f"Repo tree (top-level keys): {{list(result.keys())}}")
+    return result
+
+repo = SimpleNamespace(
+    list_files=repo_list_files,
+    grep=repo_grep,
+    read_file=repo_read_file,
+    get_tree=repo_get_tree,
+)
 """
 
             # Create RLM instance for context selection
@@ -121,16 +165,25 @@ repo = RepoContextTools('{str(self.repo_collector.repo_root)}')
         if self.rlm is None:
             raise Exception("RLM not available")
 
-        # Create context selection query
-        selection_query = f"""
+        # Create context selection query — this string becomes the `context` variable
+        # in the REPL. The RLM's default user prompt tells the model to "look at the
+        # context variable", so we put redirect instructions here.
+        selection_query = f"""=== CONTEXT SELECTION TASK ===
 User Query: {query}
 
-Analyze this query and select the most relevant source code files from the codebase.
-Use the repo tools to explore:
-1. Search for keywords related to the query using repo.grep()
-2. Read promising source code files to verify relevance
-3. Select the MINIMAL set of files that provide the context needed
-4. Wrap your final answer in FINAL()
+INSTRUCTIONS (this IS the context — there is no other data to inspect):
+1. Use repo.grep() to search for key terms. Always use print() to see results.
+2. The codebase may be in ANY language (.rs, .py, .ts, .go, .java, etc.) — search broadly.
+3. If grep returns empty, try different search terms or drop the extension filter.
+4. Use repo.read_file() to verify promising files.
+5. When done, call FINAL() with JSON: FINAL({{"relevant_files": [...], "reasoning": "..."}})
+6. Do NOT ask clarifying questions — just find the files.
+
+Example:
+```repl
+results = repo.grep("generate_rag_response")
+print(results)
+```
 """
 
         # Let RLM explore and select context
