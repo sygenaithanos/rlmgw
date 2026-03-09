@@ -13,7 +13,7 @@ class RLMgwConfig:
     port: int = 8010
 
     # Upstream vLLM settings
-    upstream_base_url: str = "http://localhost:8000/v1"
+    upstream_base_url: str = "http://192.168.2.37:8000/v1"
     upstream_model: str = "minimax-m2-1"
     upstream_connect_timeout: int = 5
     upstream_read_timeout: int = 300

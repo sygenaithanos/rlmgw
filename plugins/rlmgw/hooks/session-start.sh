@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Session start hook: check vLLM availability and report status
 
-VLLM_URL="${RLMGW_UPSTREAM_BASE_URL:-http://localhost:8000/v1}"
+VLLM_URL="${RLMGW_UPSTREAM_BASE_URL:-http://192.168.2.37:8000/v1}"
 
 RESPONSE=$(curl -s --connect-timeout 3 "${VLLM_URL}/models" 2>/dev/null)
 

@@ -32,22 +32,38 @@ def test_repo_fingerprint():
 
 def test_repo_select_context_simple_fallback():
     """Test repo_select_context falls back to simple keyword matching."""
-    # With no vLLM running, should fall back to simple selection
-    result = json.loads(repo_select_context("context pack builder"))
-    assert isinstance(result, dict)
-    assert "relevant_files" in result
-    assert "file_contents" in result
-    assert "repo_fingerprint" in result
-    assert "selection_mode" in result
-    # Should find files related to "context pack builder"
-    assert len(result["relevant_files"]) > 0
+    # Mock vLLM as unavailable to force simple keyword fallback
+    with patch("rlmgw.mcp_server._discover_upstream_model", return_value=None), \
+         patch("rlmgw.mcp_server._get_config") as mock_config:
+        config = mock_config.return_value
+        config.use_rlm_context_selection = False
+        config.max_context_pack_chars = 12000
+        config.repo_root = "."
+        config.upstream_base_url = "http://localhost:99999/v1"
+
+        result = json.loads(repo_select_context("context pack builder"))
+        assert isinstance(result, dict)
+        assert "relevant_files" in result
+        assert "file_contents" in result
+        assert "repo_fingerprint" in result
+        assert result["selection_mode"] == "simple"
+        # Should find files related to "context pack builder"
+        assert len(result["relevant_files"]) > 0
 
 
 def test_repo_select_context_max_chars():
     """Test that max_chars parameter limits output size."""
-    result = json.loads(repo_select_context("test query", max_chars=500))
-    total_chars = sum(len(c) for c in result["file_contents"].values())
-    assert total_chars <= 1000  # Allow some overhead from truncation marker
+    with patch("rlmgw.mcp_server._discover_upstream_model", return_value=None), \
+         patch("rlmgw.mcp_server._get_config") as mock_config:
+        config = mock_config.return_value
+        config.use_rlm_context_selection = False
+        config.max_context_pack_chars = 500
+        config.repo_root = "."
+        config.upstream_base_url = "http://localhost:99999/v1"
+
+        result = json.loads(repo_select_context("test query", max_chars=500))
+        total_chars = sum(len(c) for c in result["file_contents"].values())
+        assert total_chars <= 1000  # Allow some overhead from truncation marker
 
 
 def test_discover_upstream_model_unavailable():
@@ -72,9 +88,14 @@ def test_discover_upstream_model_success():
 
 def test_vllm_status_unavailable():
     """Test vllm_status when server is not running."""
-    result = json.loads(vllm_status())
-    assert result["status"] == "unavailable"
-    assert result["model"] is None
+    with patch("rlmgw.mcp_server._discover_upstream_model", return_value=None), \
+         patch("rlmgw.mcp_server._get_config") as mock_config:
+        config = mock_config.return_value
+        config.upstream_base_url = "http://localhost:99999/v1"
+
+        result = json.loads(vllm_status())
+        assert result["status"] == "unavailable"
+        assert result["model"] is None
 
 
 def test_get_repo_tools_singleton():

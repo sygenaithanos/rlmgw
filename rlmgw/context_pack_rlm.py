@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 
 from .config import RLMgwConfig
 from .models import ContextPack
@@ -13,29 +14,39 @@ logger = logging.getLogger(__name__)
 # System prompt for context selection RLM
 CONTEXT_SELECTION_PROMPT = """You are a context selection assistant for a coding agent.
 
-Your task is to analyze a user's query and select the MOST RELEVANT files and context from a codebase.
+Your task is to analyze a user's query and select the MOST RELEVANT source code files from a codebase.
 
 You have access to these tools in your REPL environment:
-- repo.list_files() -> List[str]  # List all files in repo
-- repo.grep(pattern: str) -> Dict[str, List[str]]  # Search for pattern
+- repo.list_files(extensions=None) -> List[str]  # List files, optionally filtered by extension
+- repo.grep(pattern: str, extensions=None) -> Dict[str, List[str]]  # Search for pattern
 - repo.read_file(path: str) -> str  # Read file contents
 - repo.get_tree() -> Dict  # Get directory structure
 
 Your goal:
 1. Understand what the user is asking about
-2. Use the tools to explore and find relevant code
-3. Select the MINIMAL set of files/snippets that provide high-signal context
-4. Return your selection as a JSON object
+2. Use the tools to explore and find relevant source code
+3. PRIORITIZE source code files (.py, .rs, .ts, .go, .java, etc.) over docs, configs, and generated files
+4. Select the MINIMAL set of files that provide high-signal context
+5. Return your selection as a JSON object wrapped in FINAL()
 
-Output format:
-```json
-{
-    "relevant_files": ["path/to/file1.py", "path/to/file2.py"],
-    "reasoning": "Brief explanation of why these files are relevant"
-}
+Strategy:
+- Start by grepping for key terms from the query
+- Read promising source files to verify relevance
+- Prefer implementation files over tests, docs, configs, or generated output
+- Skip markdown plans, migration docs, JSON output files, and settings files unless directly relevant
+
+When you want to execute Python code, wrap it in triple backticks with 'repl' language identifier:
+```repl
+results = repo.grep("function_name")
+print(results)
 ```
 
-Keep context COMPACT but HIGH-SIGNAL. Quality over quantity.
+IMPORTANT: When you have completed your selection, you MUST provide your final answer using:
+FINAL({"relevant_files": ["path/to/file1.py", "path/to/file2.rs"], "reasoning": "Brief explanation"})
+
+Do NOT just output JSON — wrap it in FINAL(). Do NOT use FINAL() until you have explored the codebase and are confident in your selection.
+
+Keep context COMPACT but HIGH-SIGNAL. Quality over quantity. Source code over documentation.
 """
 
 
@@ -114,29 +125,51 @@ repo = RepoContextTools('{str(self.repo_collector.repo_root)}')
         selection_query = f"""
 User Query: {query}
 
-Analyze this query and select the most relevant files from the codebase.
+Analyze this query and select the most relevant source code files from the codebase.
 Use the repo tools to explore:
-1. Search for keywords related to the query
-2. Read relevant files to understand their purpose
+1. Search for keywords related to the query using repo.grep()
+2. Read promising source code files to verify relevance
 3. Select the MINIMAL set of files that provide the context needed
-
-Return your selection as JSON.
+4. Wrap your final answer in FINAL()
 """
 
         # Let RLM explore and select context
         logger.info(f"Running RLM context selection for query: {query[:100]}")
-        result = self.rlm.completion(selection_query)
+        result = self.rlm.completion(selection_query, root_prompt=query)
+
+        # find_final_answer() returns tuple (type, content) when FINAL() is used,
+        # or _default_answer() returns a raw string when iterations exhaust
+        response_text = result.response
+        if isinstance(response_text, tuple):
+            response_text = response_text[1]  # Extract content from ("FINAL", content)
 
         # Parse RLM's selection
         try:
-            selection_data = json.loads(result.response)
+            selection_data = json.loads(response_text)
             relevant_files = selection_data.get("relevant_files", [])
             reasoning = selection_data.get("reasoning", "")
 
             logger.info(f"RLM selected {len(relevant_files)} files: {reasoning}")
 
             return self._build_context_pack(query, relevant_files)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
+            # Try to extract JSON from surrounding prose
+            json_match = re.search(
+                r'\{[^{}]*"relevant_files"\s*:\s*\[.*?\][^{}]*\}',
+                str(response_text),
+                re.DOTALL,
+            )
+            if json_match:
+                try:
+                    selection_data = json.loads(json_match.group())
+                    relevant_files = selection_data.get("relevant_files", [])
+                    reasoning = selection_data.get("reasoning", "")
+                    logger.info(
+                        f"RLM selected {len(relevant_files)} files (extracted from text): {reasoning}"
+                    )
+                    return self._build_context_pack(query, relevant_files)
+                except (json.JSONDecodeError, TypeError):
+                    pass
             logger.warning("RLM didn't return valid JSON. Falling back to simple selection.")
             return self._build_simple(query)
 
