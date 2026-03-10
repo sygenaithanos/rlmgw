@@ -30,14 +30,6 @@ def _get_config():
     return _config
 
 
-def _get_repo_tools() -> RepoContextTools:
-    global _repo_tools
-    if _repo_tools is None:
-        config = _get_config()
-        _repo_tools = RepoContextTools(config.repo_root)
-    return _repo_tools
-
-
 def _discover_upstream_model(base_url: str) -> str | None:
     """Discover the model name from a vLLM /v1/models endpoint."""
     try:
@@ -55,8 +47,20 @@ def _discover_upstream_model(base_url: str) -> str | None:
     return None
 
 
+def _get_repo_tools_for(repo_root: str) -> RepoContextTools:
+    """Get or create RepoContextTools for a specific repo root."""
+    global _repo_tools
+    default_root = _get_config().repo_root
+    # Reuse cached singleton if same root (or no override)
+    if repo_root == default_root and _repo_tools is not None:
+        return _repo_tools
+    return RepoContextTools(repo_root)
+
+
 @mcp.tool()
-def repo_select_context(query: str, max_chars: int | None = None) -> str:
+def repo_select_context(
+    query: str, max_chars: int | None = None, repo_root: str | None = None
+) -> str:
     """Use RLM to intelligently select the most relevant files for a query.
 
     This tool uses a local LLM (via vLLM) with recursive language model
@@ -70,12 +74,15 @@ def repo_select_context(query: str, max_chars: int | None = None) -> str:
             (e.g., "How does authentication work?" or "Find the database models").
         max_chars: Maximum total characters of file content to return.
             Defaults to RLMGW_MAX_CONTEXT_PACK_CHARS (12000).
+        repo_root: Optional path to the repository to search. If not provided,
+            uses RLMGW_REPO_ROOT or the current working directory.
 
     Returns:
         JSON with relevant_files, file_contents, and repo_fingerprint.
     """
     config = _get_config()
-    tools = _get_repo_tools()
+    effective_root = repo_root or config.repo_root
+    tools = _get_repo_tools_for(effective_root)
 
     if max_chars is not None:
         config.max_context_pack_chars = max_chars
@@ -119,32 +126,42 @@ def repo_select_context(query: str, max_chars: int | None = None) -> str:
 
 
 @mcp.tool()
-def repo_tree() -> str:
+def repo_tree(repo_root: str | None = None) -> str:
     """Get the directory tree structure of the repository.
 
     Returns a hierarchical view of the codebase, useful for understanding
     project layout before diving into specific files.
 
+    Args:
+        repo_root: Optional path to the repository. If not provided,
+            uses RLMGW_REPO_ROOT or the current working directory.
+
     Returns:
         JSON nested object representing the directory hierarchy.
         Excludes .git, node_modules, .venv, __pycache__, and other common noise.
     """
-    tools = _get_repo_tools()
+    effective_root = repo_root or _get_config().repo_root
+    tools = _get_repo_tools_for(effective_root)
     tree = tools.get_tree()
     return json.dumps(tree)
 
 
 @mcp.tool()
-def repo_fingerprint() -> str:
+def repo_fingerprint(repo_root: str | None = None) -> str:
     """Get the repository fingerprint (git HEAD hash or content hash).
 
     Useful for cache invalidation — if the fingerprint changes, the
     repo contents have changed.
 
+    Args:
+        repo_root: Optional path to the repository. If not provided,
+            uses RLMGW_REPO_ROOT or the current working directory.
+
     Returns:
         Repository fingerprint string.
     """
-    tools = _get_repo_tools()
+    effective_root = repo_root or _get_config().repo_root
+    tools = _get_repo_tools_for(effective_root)
     return tools.get_fingerprint()
 
 

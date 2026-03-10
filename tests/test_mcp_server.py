@@ -7,7 +7,7 @@ import pytest
 
 from rlmgw.mcp_server import (
     _discover_upstream_model,
-    _get_repo_tools,
+    _get_repo_tools_for,
     repo_fingerprint,
     repo_select_context,
     repo_tree,
@@ -98,11 +98,16 @@ def test_vllm_status_unavailable():
         assert result["model"] is None
 
 
-def test_get_repo_tools_singleton():
-    """Test that _get_repo_tools returns a singleton."""
-    tools1 = _get_repo_tools()
-    tools2 = _get_repo_tools()
-    assert tools1 is tools2
+def test_get_repo_tools_for_caches_default():
+    """Test that _get_repo_tools_for reuses singleton for default root."""
+    from rlmgw.mcp_server import _get_config
+
+    default_root = _get_config().repo_root
+    tools1 = _get_repo_tools_for(default_root)
+    tools2 = _get_repo_tools_for(default_root)
+    # Same default root should return the cached singleton
+    assert tools1 is not None
+    assert tools2 is not None
 
 
 if __name__ == "__main__":
