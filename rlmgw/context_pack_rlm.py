@@ -12,45 +12,33 @@ logger = logging.getLogger(__name__)
 
 
 # System prompt for context selection RLM
-CONTEXT_SELECTION_PROMPT = """You are a context selection assistant. Your task is to find the MOST RELEVANT source code files for a user's query.
+CONTEXT_SELECTION_PROMPT = """You are a code search agent. You MUST use REPL tools to explore a codebase.
 
-You have access to repo tools in your REPL. You MUST use print() to see results — bare expressions are truncated.
+CRITICAL: The `context` variable is just a task description string — it is NOT the codebase.
+The codebase is accessed ONLY through the `repo` object in the REPL. You MUST write ```repl``` code blocks to use it.
 
-Available tools:
-- repo.grep(pattern, extensions=None) -> Dict[str, List[str]]  # Search file contents
-- repo.list_files(extensions=None) -> List[str]  # List files by extension
-- repo.read_file(path) -> str  # Read a file
-- repo.get_tree() -> Dict  # Directory structure
+Available repo tools (REPL only):
+- repo.grep(pattern, extensions=None) -> Dict[str, List[str]]
+- repo.list_files(extensions=None) -> List[str]
+- repo.read_file(path) -> str
+- repo.get_tree() -> Dict
 
-IMPORTANT RULES:
-1. Always wrap tool calls in print() so you can see the output
-2. Search broadly — the codebase may use ANY language (.py, .rs, .ts, .go, .java, .cpp, etc.)
-3. If a grep returns empty for one extension, try without extensions or with different ones
-4. PRIORITIZE source code over docs, configs, tests, or generated output
-5. Do NOT reference or use the `context` variable — use repo.* tools instead
-6. When done, call FINAL() with your answer — not just bare JSON
-
-Example workflow:
+MANDATORY WORKFLOW — you MUST follow these steps:
+1. FIRST action: write a ```repl``` block to grep or list files. Example:
 ```repl
-# First, find what languages are in the repo
-files = repo.list_files()
-print(f"Total files: {len(files)}, first 20: {files[:20]}")
+results = repo.grep("search_term")
 ```
-```repl
-# Search for the key term
-results = repo.grep("my_function")
-print(results)
-```
-```repl
-# Read a promising file
-content = repo.read_file("src/module.rs")
-print(content[:2000])
-```
+2. Read promising source files with repo.read_file()
+3. When done, call FINAL() with your selection:
+FINAL({"relevant_files": ["path/to/file.rs"], "reasoning": "brief explanation"})
 
-When you have identified the relevant files, provide your answer:
-FINAL({"relevant_files": ["path/to/file1.rs", "path/to/file2.py"], "reasoning": "Brief explanation"})
-
-Do NOT use FINAL() until you have explored the codebase. Keep selections COMPACT and HIGH-SIGNAL.
+RULES:
+- ALWAYS write ```repl``` code blocks — never just text responses
+- All repo.* calls auto-print results, no need for print()
+- Prioritize source code (.rs, .py, .ts, .go, .java) over docs/configs/tests
+- Do NOT call FINAL() until you have explored with repo tools
+- Do NOT inspect or analyze the `context` variable — use repo.* instead
+- Do NOT ask clarifying questions — just search the codebase
 """
 
 
@@ -94,7 +82,7 @@ base_repo = RepoContextTools('{repo_root_escaped}')
 
 def repo_list_files(extensions=None):
     result = base_repo.list_files(extensions)
-    print(f"Found {{len(result)}} files. First 30: {{result[:30]}}")
+    print(f"Found {{len(result)}} files (ext={{extensions}}). First 30: {{result[:30]}}")
     return result
 
 def repo_grep(pattern, extensions=None):
@@ -165,26 +153,12 @@ repo = SimpleNamespace(
         if self.rlm is None:
             raise Exception("RLM not available")
 
-        # Create context selection query — this string becomes the `context` variable
-        # in the REPL. The RLM's default user prompt tells the model to "look at the
-        # context variable", so we put redirect instructions here.
-        selection_query = f"""=== CONTEXT SELECTION TASK ===
-User Query: {query}
-
-INSTRUCTIONS (this IS the context — there is no other data to inspect):
-1. Use repo.grep() to search for key terms. Always use print() to see results.
-2. The codebase may be in ANY language (.rs, .py, .ts, .go, .java, etc.) — search broadly.
-3. If grep returns empty, try different search terms or drop the extension filter.
-4. Use repo.read_file() to verify promising files.
-5. When done, call FINAL() with JSON: FINAL({{"relevant_files": [...], "reasoning": "..."}})
-6. Do NOT ask clarifying questions — just find the files.
-
-Example:
-```repl
-results = repo.grep("generate_rag_response")
-print(results)
-```
-"""
+        # This string becomes the `context` variable in the REPL.
+        # The default user prompt (prompts.py) tells the model to "use the context
+        # variable". The model will see this when it inspects `context`. We redirect
+        # it to use repo.* tools instead.
+        selection_query = f"""IGNORE this variable. Use repo.* tools in the REPL instead.
+Find source files for: {query}"""
 
         # Let RLM explore and select context
         logger.info(f"Running RLM context selection for query: {query[:100]}")
@@ -193,6 +167,7 @@ print(results)
         # find_final_answer() returns tuple (type, content) when FINAL() is used,
         # or _default_answer() returns a raw string when iterations exhaust
         response_text = result.response
+        logger.debug(f"RLM raw response type={type(response_text).__name__}: {repr(str(response_text))[:500]}")
         if isinstance(response_text, tuple):
             response_text = response_text[1]  # Extract content from ("FINAL", content)
 
@@ -204,7 +179,7 @@ print(results)
 
             logger.info(f"RLM selected {len(relevant_files)} files: {reasoning}")
 
-            return self._build_context_pack(query, relevant_files)
+            return self._build_context_pack(relevant_files)
         except (json.JSONDecodeError, TypeError):
             # Try to extract JSON from surrounding prose
             json_match = re.search(
@@ -220,9 +195,18 @@ print(results)
                     logger.info(
                         f"RLM selected {len(relevant_files)} files (extracted from text): {reasoning}"
                     )
-                    return self._build_context_pack(query, relevant_files)
+                    return self._build_context_pack(relevant_files)
                 except (json.JSONDecodeError, TypeError):
                     pass
+            # Last resort: extract file paths from REPL output/response text.
+            # The RLM may have explored files but never produced FINAL() JSON.
+            files_from_text = self._extract_file_paths_from_text(str(response_text))
+            if files_from_text:
+                logger.info(
+                    f"RLM selected {len(files_from_text)} files (extracted paths from text)"
+                )
+                return self._build_context_pack(relevant_files=files_from_text)
+
             logger.warning("RLM didn't return valid JSON. Falling back to simple selection.")
             return self._build_simple(query)
 
@@ -234,9 +218,23 @@ print(results)
         keywords = self._extract_keywords(query)
         relevant_files = self._find_relevant_files(keywords)
 
-        return self._build_context_pack(query, relevant_files)
+        return self._build_context_pack(relevant_files)
 
-    def _build_context_pack(self, query: str, relevant_files: list[str]) -> ContextPack:
+    def _extract_file_paths_from_text(self, text: str) -> list[str]:
+        """Extract file paths from RLM response text as a last resort."""
+        path_pattern = re.findall(r'[\w./-]+\.(?:rs|py|ts|tsx|js|go|java|cpp|c|h)', text)
+        # Verify they exist in the repo
+        valid_files = []
+        seen = set()
+        for path in path_pattern:
+            if path not in seen and self.repo_collector.read_file_safe(path) is not None:
+                valid_files.append(path)
+                seen.add(path)
+                if len(valid_files) >= 10:
+                    break
+        return valid_files
+
+    def _build_context_pack(self, relevant_files: list[str]) -> ContextPack:
         """Build context pack from selected files."""
         repo_fingerprint = self.repo_collector.get_repo_fingerprint()
 

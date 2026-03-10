@@ -3,7 +3,7 @@
   "env": {
     "RLMGW_UPSTREAM_BASE_URL": "http://192.168.2.37:8000/v1",
     "RLMGW_MAX_CONTEXT_PACK_CHARS": "12000",
-    "RLMGW_MAX_INTERNAL_CALLS": "3",
+    "RLMGW_MAX_INTERNAL_CALLS": "5",
     "RLMGW_USE_RLM_CONTEXT_SELECTION": "true"
   },
   "permissions": {
