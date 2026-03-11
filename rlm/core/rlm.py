@@ -47,6 +47,7 @@ class RLM:
         max_depth: int = 1,
         max_iterations: int = 30,
         custom_system_prompt: str | None = None,
+        custom_user_prompt: str | None = None,
         other_backends: list[ClientBackend] | None = None,
         other_backend_kwargs: list[dict[str, Any]] | None = None,
         logger: RLMLogger | None = None,
@@ -62,6 +63,9 @@ class RLM:
             max_depth: The maximum depth of the RLM. Currently, only depth 1 is supported.
             max_iterations: The maximum number of iterations of the RLM.
             custom_system_prompt: The custom system prompt to use for the RLM.
+            custom_user_prompt: Optional custom user prompt template. When set,
+                replaces the default USER_PROMPT on each iteration. Use {root_prompt}
+                placeholder for the root prompt if needed.
             other_backends: A list of other client backends that the environments can use to make sub-calls.
             other_backend_kwargs: The kwargs to pass to the other client backends (ordered to match other_backends).
             logger: The logger to use for the RLM.
@@ -81,6 +85,7 @@ class RLM:
         self.max_depth = max_depth
         self.max_iterations = max_iterations
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
+        self.custom_user_prompt = custom_user_prompt
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
 
@@ -177,7 +182,13 @@ class RLM:
 
             for i in range(self.max_iterations):
                 # Current prompt = message history + additional prompt suffix
-                current_prompt = message_history + [build_user_prompt(root_prompt, i)]
+                if self.custom_user_prompt:
+                    user_msg = self.custom_user_prompt.format(
+                        root_prompt=root_prompt or "", iteration=i
+                    )
+                    current_prompt = message_history + [{"role": "user", "content": user_msg}]
+                else:
+                    current_prompt = message_history + [build_user_prompt(root_prompt, i)]
 
                 iteration: RLMIteration = self._completion_turn(
                     prompt=current_prompt,

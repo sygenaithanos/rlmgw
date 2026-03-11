@@ -28,6 +28,17 @@ class OpenAIClient(BaseLM):
         base_url: str | None = None,
         **kwargs,
     ):
+        # Extract sampling parameters before passing to super
+        self.sampling_params: dict[str, Any] = {}
+        self.extra_body_params: dict[str, Any] = {}
+        for key in ("temperature", "top_p", "max_tokens"):
+            if key in kwargs:
+                self.sampling_params[key] = kwargs.pop(key)
+        # top_k and repetition_penalty are vLLM-specific (not OpenAI standard)
+        for key in ("top_k", "repetition_penalty"):
+            if key in kwargs:
+                self.extra_body_params[key] = kwargs.pop(key)
+
         super().__init__(model_name=model_name, **kwargs)
 
         if api_key is None:
@@ -59,12 +70,15 @@ class OpenAIClient(BaseLM):
         if not model:
             raise ValueError("Model name is required for OpenAI client.")
 
-        extra_body = {}
+        extra_body = {**self.extra_body_params}
         if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
             extra_body["usage"] = {"include": True}
 
         response = self.client.chat.completions.create(
-            model=model, messages=messages, extra_body=extra_body
+            model=model,
+            messages=messages,
+            extra_body=extra_body if extra_body else None,
+            **self.sampling_params,
         )
         self._track_cost(response, model)
         return response.choices[0].message.content

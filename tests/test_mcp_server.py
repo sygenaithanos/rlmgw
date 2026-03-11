@@ -33,8 +33,10 @@ def test_repo_fingerprint():
 def test_repo_select_context_simple_fallback():
     """Test repo_select_context falls back to simple keyword matching."""
     # Mock vLLM as unavailable to force simple keyword fallback
-    with patch("rlmgw.mcp_server._discover_upstream_model", return_value=None), \
-         patch("rlmgw.mcp_server._get_config") as mock_config:
+    with (
+        patch("rlmgw.mcp_server._discover_upstream_model", return_value=None),
+        patch("rlmgw.mcp_server._get_config") as mock_config,
+    ):
         config = mock_config.return_value
         config.use_rlm_context_selection = False
         config.max_context_pack_chars = 12000
@@ -53,8 +55,10 @@ def test_repo_select_context_simple_fallback():
 
 def test_repo_select_context_max_chars():
     """Test that max_chars parameter limits output size."""
-    with patch("rlmgw.mcp_server._discover_upstream_model", return_value=None), \
-         patch("rlmgw.mcp_server._get_config") as mock_config:
+    with (
+        patch("rlmgw.mcp_server._discover_upstream_model", return_value=None),
+        patch("rlmgw.mcp_server._get_config") as mock_config,
+    ):
         config = mock_config.return_value
         config.use_rlm_context_selection = False
         config.max_context_pack_chars = 500
@@ -88,8 +92,10 @@ def test_discover_upstream_model_success():
 
 def test_vllm_status_unavailable():
     """Test vllm_status when server is not running."""
-    with patch("rlmgw.mcp_server._discover_upstream_model", return_value=None), \
-         patch("rlmgw.mcp_server._get_config") as mock_config:
+    with (
+        patch("rlmgw.mcp_server._discover_upstream_model", return_value=None),
+        patch("rlmgw.mcp_server._get_config") as mock_config,
+    ):
         config = mock_config.return_value
         config.upstream_base_url = "http://localhost:99999/v1"
 
