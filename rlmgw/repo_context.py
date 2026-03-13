@@ -55,6 +55,39 @@ def _file_priority(filepath: str) -> int:
     return 3
 
 
+# Entry point filenames that indicate architectural importance
+ENTRY_POINT_NAMES = {
+    "lib.rs",
+    "main.rs",
+    "mod.rs",  # Rust
+    "__init__.py",
+    "app.py",
+    "main.py",
+    "server.py",  # Python
+    "index.ts",
+    "index.js",
+    "app.ts",
+    "app.js",
+    "main.ts",  # JS/TS
+    "main.go",
+    "cmd.go",  # Go
+    "Main.java",
+    "Application.java",  # Java
+}
+
+# Build config files that define project structure
+BUILD_CONFIG_NAMES = {
+    "Cargo.toml",
+    "pyproject.toml",
+    "package.json",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "CMakeLists.txt",
+    "Makefile",
+}
+
+
 class RepoContextCollector:
     """Collects context from repository in a read-only, safe manner."""
 
@@ -72,6 +105,7 @@ class RepoContextCollector:
         self.max_file_size = 1024 * 1024  # 1MB
         self.max_file_read = 1024 * 100  # 100KB per file
         self.max_grep_results = 50
+        self._file_list_cache: list[str] | None = None
 
     def _is_excluded(self, path: Path) -> bool:
         """Check if path should be excluded."""
@@ -291,3 +325,62 @@ class RepoContextCollector:
 
         file_list.sort(key=_file_priority)
         return file_list[:max_files]
+
+    def find_entry_points(self) -> list[str]:
+        """Find architectural entry point files (lib.rs, main.rs, __init__.py, etc.)."""
+        all_files = self.get_file_list(
+            extensions=SOURCE_EXTENSIONS + [".toml", ".json"],
+            max_files=1000,
+        )
+        entry_points = []
+        build_configs = []
+        for f in all_files:
+            basename = f.rsplit("/", 1)[-1]
+            if basename in ENTRY_POINT_NAMES:
+                entry_points.append(f)
+            elif basename in BUILD_CONFIG_NAMES:
+                build_configs.append(f)
+        # Entry points first, then build configs
+        return entry_points + build_configs
+
+    def find_hub_files(self, max_files: int = 20) -> list[str]:
+        """Find files that are import/export hubs (most structurally connected).
+
+        Scores files by counting structural keywords (mod, use, import, pub, export)
+        in the first 60 lines. Files with higher scores are more architecturally central.
+        """
+        source_files = self.get_file_list(extensions=SOURCE_EXTENSIONS, max_files=300)
+        hub_keywords = (
+            "mod ",
+            "pub mod ",
+            "use ",
+            "pub use ",  # Rust
+            "import ",
+            "from ",
+            "export ",  # Python/JS/TS
+            "require(",
+            "#include ",  # JS/C/C++
+        )
+        scored = []
+        for f in source_files:
+            content = self.read_file_safe(f)
+            if not content:
+                continue
+            # Only scan first 60 lines (imports are at the top)
+            lines = content.split("\n")[:60]
+            score = sum(
+                1 for line in lines if any(line.strip().startswith(kw) for kw in hub_keywords)
+            )
+            if score > 0:
+                scored.append((f, score))
+
+        scored.sort(key=lambda x: -x[1])
+        return [f for f, _ in scored[:max_files]]
+
+    def get_file_summary(self, file_path: str, max_lines: int = 10) -> str:
+        """Get first N lines of a file as a quick summary."""
+        content = self.read_file_safe(file_path)
+        if not content:
+            return ""
+        lines = content.split("\n")[:max_lines]
+        return "\n".join(lines)

@@ -6,7 +6,7 @@ import re
 
 from .config import RLMgwConfig
 from .models import ContextPack
-from .repo_context import RepoContextCollector
+from .repo_context import ENTRY_POINT_NAMES, RepoContextCollector
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,9 @@ class RLMContextPackBuilder:
 
         # We'll initialize RLM when needed to avoid import issues
         self.rlm = None
+
+        # LSP manager for semantic code intelligence (lazy init)
+        self._lsp = None
 
     def _initialize_rlm(self):
         """Initialize RLM with context selection configuration."""
@@ -230,9 +233,20 @@ repo = SimpleNamespace(
             self.rlm = None
 
     def build_from_query(self, query: str) -> ContextPack:
-        """Build context pack using RLM-based intelligent selection."""
+        """Build context pack using neuro-symbolic pipeline.
 
-        # Try RLM-based selection first
+        Pipeline: symbolic retrieval → neural reranking → symbolic assembly.
+        Falls back to pure RLM exploration, then keyword search.
+        """
+        # Primary path: neuro-symbolic pipeline
+        try:
+            result = self._build_with_symbolic_pipeline(query)
+            if result.relevant_files:
+                return result
+        except Exception as e:
+            logger.warning(f"Symbolic pipeline failed: {e}")
+
+        # Secondary path: RLM REPL exploration
         try:
             return self._build_with_rlm(query)
         except Exception as e:
@@ -333,6 +347,240 @@ Prioritize source code (.rs, .py, .ts, .go) over docs/configs/tests.
 
             logger.warning("RLM didn't return valid JSON. Falling back to simple selection.")
             return self._build_simple(query)
+
+    # ── Neuro-symbolic pipeline ──────────────────────────────────────────
+
+    def _build_with_symbolic_pipeline(self, query: str) -> ContextPack:
+        """Neuro-symbolic pipeline: symbolic retrieval → neural reranking → assembly.
+
+        1. Classify query type symbolically (architecture vs. specific)
+        2. Retrieve candidates deterministically (entry points, hub files, grep, filenames)
+        3. Rerank candidates with a simple LLM call (classification, not REPL)
+        4. Assemble the final context pack
+        """
+        query_type = self._classify_query(query)
+        logger.info(f"Symbolic pipeline: query_type={query_type}, query={query[:80]}")
+
+        # Step 1: Symbolic candidate retrieval
+        candidates = self._symbolic_retrieve(query, query_type)
+        if not candidates:
+            logger.info("Symbolic pipeline: no candidates found")
+            raise ValueError("No candidates from symbolic retrieval")
+
+        logger.info(f"Symbolic pipeline: {len(candidates)} candidates retrieved")
+
+        # Step 2: Neural reranking
+        ranked_files = self._neural_rerank(query, candidates, query_type)
+        logger.info(f"Symbolic pipeline: {len(ranked_files)} files after reranking")
+
+        # Step 3: Symbolic assembly
+        return self._build_context_pack(ranked_files)
+
+    def _classify_query(self, query: str) -> str:
+        """Classify query type using LLM.
+
+        Uses a single LLM call for robust classification. Falls back to
+        "specific" if the LLM call fails.
+        """
+        prompt = (
+            "Classify this codebase query into exactly one category.\n\n"
+            "Categories:\n"
+            '- "architecture": asking about overall project structure, module layout, '
+            "how the system is organized, entry points, workspace structure\n"
+            '- "specific": asking about a specific function, file, feature, component, '
+            "or implementation detail\n\n"
+            f'Query: "{query}"\n\n'
+            "Respond with ONLY the category name, nothing else."
+        )
+        try:
+            from rlm.clients import get_client
+
+            client = get_client(
+                "openai",
+                {
+                    "model_name": self.config.upstream_model,
+                    "base_url": self.config.upstream_base_url,
+                    "api_key": "dummy",
+                    "temperature": 0.01,
+                    "max_tokens": 32,
+                },
+            )
+            response = client.completion(prompt).strip().lower().strip("\"'")
+            if "architecture" in response:
+                return "architecture"
+            return "specific"
+        except Exception as e:
+            logger.warning(f"LLM classification failed: {e}, defaulting to specific")
+            return "specific"
+
+    def _get_lsp(self):
+        """Lazily initialize LSP manager."""
+        if self._lsp is None:
+            from .lsp_client import LSPManager
+
+            self._lsp = LSPManager(str(self.repo_collector.repo_root))
+        return self._lsp
+
+    def _symbolic_retrieve(self, query: str, query_type: str) -> list[tuple[str, str]]:
+        """Candidate retrieval using LSP (primary) + grep/filenames (fallback).
+
+        LSP provides semantic symbol search (workspace/symbol) which is
+        categorically better than text grep for finding code definitions.
+        Falls back to grep/filename matching when LSP is unavailable.
+        """
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def add_candidate(path: str) -> None:
+            if path in seen:
+                return
+            # Normalize to relative path
+            repo_root = str(self.repo_collector.repo_root)
+            if path.startswith(repo_root):
+                path = path[len(repo_root) :].lstrip("/")
+            seen.add(path)
+            summary = self.repo_collector.get_file_summary(path, max_lines=8)
+            candidates.append((path, summary))
+
+        keywords = self._extract_keywords(query)
+
+        # 1. LSP semantic symbol search (highest quality)
+        lsp_found = 0
+        try:
+            lsp = self._get_lsp()
+            lsp.initialize(timeout_per_server=90.0)
+            if lsp.available:
+                for keyword in keywords[:5]:
+                    symbols = lsp.workspace_symbol(keyword)
+                    for sym in symbols:
+                        if sym.file_path:
+                            add_candidate(sym.file_path)
+                            lsp_found += 1
+                if lsp_found:
+                    logger.info(f"LSP workspace/symbol found {lsp_found} symbols")
+        except Exception as e:
+            logger.debug(f"LSP retrieval failed: {e}")
+
+        # 2. Filename matching (catches files like output_parser.rs)
+        file_list = self.repo_collector.get_file_list()
+        for path in file_list:
+            basename = path.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
+            if any(kw.lower() in basename for kw in keywords):
+                add_candidate(path)
+
+        # 3. Content grep (fallback, or supplement when LSP found few results)
+        if lsp_found < 5:
+            for keyword in keywords[:4]:
+                if len(candidates) >= 30:
+                    break
+                grep_results = self.repo_collector.grep_repo(keyword)
+                for path in grep_results:
+                    if len(candidates) >= 30:
+                        break
+                    add_candidate(path)
+
+        # 4. For architecture queries, supplement with entry points and hubs
+        if query_type == "architecture":
+            for f in self.repo_collector.find_entry_points():
+                add_candidate(f)
+            for f in self.repo_collector.find_hub_files(max_files=15):
+                add_candidate(f)
+
+        return candidates[:40]
+
+    def _neural_rerank(
+        self,
+        query: str,
+        candidates: list[tuple[str, str]],
+        query_type: str,
+    ) -> list[str]:
+        """Use LLM to rerank candidates via a simple classification prompt.
+
+        This is NOT free-form REPL exploration — it's a single structured LLM call
+        asking "which of these files are relevant?" Much easier for small models.
+        Falls back to heuristic ordering if the LLM call fails.
+        """
+        # Build candidate descriptions
+        candidate_lines = []
+        for i, (path, summary) in enumerate(candidates):
+            # Show first line of summary as a hint
+            first_line = summary.split("\n")[0].strip() if summary else "(empty)"
+            candidate_lines.append(f"{i + 1}. {path} — {first_line}")
+
+        candidate_text = "\n".join(candidate_lines)
+
+        if query_type == "architecture":
+            instruction = (
+                "Select the files that best represent the system's architecture: "
+                "entry points (lib.rs, main.rs, __init__.py), module declarations, "
+                "and build configs. Prefer source code over docs. Select 5-15 files."
+            )
+        else:
+            instruction = (
+                "Select the files most relevant to the query. "
+                "Prefer implementation files over tests and docs. Select 3-10 files."
+            )
+
+        prompt = (
+            f'Query: "{query}"\n\n'
+            f"{instruction}\n\n"
+            f"Candidates:\n{candidate_text}\n\n"
+            "Respond with ONLY a JSON array of file paths, e.g.:\n"
+            '["path/to/file1.rs", "path/to/file2.py"]'
+        )
+
+        try:
+            from rlm.clients import get_client
+
+            client = get_client(
+                "openai",
+                {
+                    "model_name": self.config.upstream_model,
+                    "base_url": self.config.upstream_base_url,
+                    "api_key": "dummy",
+                    "temperature": 0.01,
+                    "max_tokens": 1024,
+                },
+            )
+            response = client.completion(prompt)
+            logger.debug(f"Neural rerank response: {response[:500]}")
+
+            # Extract JSON array from response
+            json_match = re.search(r"\[.*?\]", response, re.DOTALL)
+            if json_match:
+                selected = json.loads(json_match.group())
+                # Validate: only keep paths that were actual candidates
+                candidate_paths = {c[0] for c in candidates}
+                valid = [f for f in selected if f in candidate_paths]
+                if valid:
+                    logger.info(
+                        f"Neural reranking selected {len(valid)} files from {len(candidates)} candidates"
+                    )
+                    return valid
+
+        except Exception as e:
+            logger.warning(f"Neural reranking failed: {e}")
+
+        # Fallback: heuristic ordering (source code first, entry points prioritized)
+        logger.info("Neural reranking failed, using heuristic ordering")
+        return self._heuristic_rank(candidates, query_type)
+
+    def _heuristic_rank(self, candidates: list[tuple[str, str]], query_type: str) -> list[str]:
+        """Deterministic fallback ranking when neural reranking fails."""
+        source_exts = {".rs", ".py", ".ts", ".tsx", ".go", ".java", ".c", ".cpp", ".h"}
+
+        def score(path: str) -> tuple[int, int, int]:
+            ext = "." + path.rsplit(".", 1)[-1] if "." in path else ""
+            basename = path.rsplit("/", 1)[-1]
+            is_source = 0 if ext in source_exts else 1
+            is_entry = 0 if basename in ENTRY_POINT_NAMES else 1
+            is_test = 1 if "/test" in path or path.startswith("test") else 0
+            return (is_source, is_test, is_entry)
+
+        paths = [c[0] for c in candidates]
+        paths.sort(key=score)
+        limit = 15 if query_type == "architecture" else 10
+        return paths[:limit]
 
     def _build_simple(self, query: str) -> ContextPack:
         """Fallback to simple keyword-based selection."""
