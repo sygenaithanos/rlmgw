@@ -25,8 +25,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system -e .
-          uv pip install --system pytest pytest-asyncio pytest-cov
+          uv pip install --system -e ".[gw,mcp,test]"
+          uv pip install --system pyyaml
 
       - name: Run tests
         run: |
