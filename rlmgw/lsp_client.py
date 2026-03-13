@@ -11,9 +11,11 @@ Architecture:
               └── reader thread (routes JSON-RPC responses)
 """
 
+import atexit
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -90,6 +92,7 @@ class LSPConnection:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,  # Own process group for clean tree kill
             )
         except FileNotFoundError:
             logger.warning(f"LSP server not found: {self.cmd[0]}")
@@ -384,11 +387,11 @@ class LSPConnection:
         return self._indexed.wait(timeout=timeout)
 
     def stop(self):
-        """Shutdown the LSP server."""
+        """Shutdown the LSP server and reap all child processes."""
         self._shutdown = True
         if self.process and self.process.returncode is None:
             try:
-                # Graceful shutdown
+                # Graceful shutdown via LSP protocol
                 self._request("shutdown", None, timeout=5)
                 self._notify("exit", None)
             except Exception:
@@ -396,11 +399,22 @@ class LSPConnection:
             try:
                 self.process.terminate()
                 self.process.wait(timeout=5)
-            except Exception:
+            except subprocess.TimeoutExpired:
+                # Kill entire process group (handles rust-analyzer child procs)
                 try:
-                    self.process.kill()
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    try:
+                        self.process.kill()
+                    except Exception:
+                        pass
+                # Always wait to reap — prevents zombie
+                try:
+                    self.process.wait(timeout=3)
                 except Exception:
                     pass
+            except Exception:
+                pass
         self.ready = False
 
 
@@ -427,6 +441,17 @@ LANG_EXTENSIONS: dict[str, str] = {
     ".js": "typescript",
     ".jsx": "typescript",
 }
+
+
+# Module-level registry for sharing LSP managers across contexts.
+# Keyed by absolute repo_root path. Used to avoid spawning duplicate
+# LSP servers when the RLM REPL setup code runs in the same process.
+_lsp_registry: dict[str, "LSPManager"] = {}
+
+
+def get_shared_lsp(repo_root: str) -> "LSPManager | None":
+    """Retrieve an already-initialized LSPManager for this repo, if one exists."""
+    return _lsp_registry.get(str(Path(repo_root).absolute()))
 
 
 class LSPManager:
@@ -471,7 +496,7 @@ class LSPManager:
 
             # Wait for all servers to finish indexing in parallel
             wait_threads = []
-            for _lang, conn in self.servers.items():
+            for conn in self.servers.values():
                 t = threading.Thread(
                     target=conn.wait_until_indexed,
                     args=(timeout_per_server,),
@@ -554,11 +579,26 @@ class LSPManager:
         return bool(self.servers)
 
     def shutdown(self):
-        """Shutdown all LSP servers."""
+        """Shutdown all LSP servers and deregister from shared registry."""
         for server in self.servers.values():
             server.stop()
         self.servers.clear()
         self._initialized = False
+        # Remove from registry to prevent stale references
+        _lsp_registry.pop(self.repo_root, None)
 
     def __del__(self):
         self.shutdown()
+
+
+def _atexit_cleanup():
+    """Kill all registered LSP servers on interpreter shutdown."""
+    for manager in list(_lsp_registry.values()):
+        try:
+            manager.shutdown()
+        except Exception:
+            pass
+    _lsp_registry.clear()
+
+
+atexit.register(_atexit_cleanup)

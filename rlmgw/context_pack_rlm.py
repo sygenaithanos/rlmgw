@@ -11,83 +11,70 @@ from .repo_context import ENTRY_POINT_NAMES, RepoContextCollector
 logger = logging.getLogger(__name__)
 
 
-# System prompt for context selection RLM — includes few-shot examples
-# to teach the model the exact workflow expected.
-CONTEXT_SELECTION_PROMPT = """You are a code search agent. You explore a codebase using REPL tools and select the most relevant source files.
+# System prompt for context selection RLM — includes LSP-enhanced tools
+# and few-shot examples teaching the exact workflow expected.
+CONTEXT_SELECTION_PROMPT = """You are a code search agent with semantic code intelligence tools.
 
-The `context` variable contains the task description. Read it, then use `repo.*` tools to find files.
+The `context` variable contains the task and INITIAL LEADS (pre-computed candidates). Review the leads, then use tools to verify and expand.
 
 Available tools (use in ```repl``` code blocks):
-- repo.grep(pattern) -> Dict[str, List[str]]
-- repo.list_files() -> List[str]
-- repo.read_file(path) -> str
-- repo.get_tree() -> Dict
+- repo.find_symbols(query) -> List[dict]  # BEST: semantic symbol search via LSP
+- repo.entry_points() -> List[str]        # Find architectural entry points (lib.rs, main.rs, etc.)
+- repo.doc_symbols(path) -> List[dict]    # List all symbols in a file
+- repo.grep(pattern) -> Dict[str, List[str]]  # Text search
+- repo.read_file(path) -> str             # Read file contents
+- repo.list_files() -> List[str]          # List all files
 
 RULES:
 - ALWAYS respond with ```repl``` code blocks
-- Prioritize source code (.rs, .py, .ts, .go) over docs/configs — do NOT return .md or .json files
-- Use file paths from repo.grep() and repo.list_files() output — do not invent paths
-- After grep finds files, read them to verify, then call FINAL()
+- Start by reviewing INITIAL LEADS in `context`, then verify with repo.read_file()
+- Use repo.find_symbols() for semantic search — it's more precise than grep
+- Prioritize source code (.rs, .py, .ts, .go) over docs/configs
+- Use EXACT paths from tool output — do not invent paths
 - When done, call FINAL() with JSON
 
-=== EXAMPLE 1: Specific function search ===
+=== EXAMPLE 1: Starting from initial leads ===
 
 User query: "Find the authentication middleware"
 
-Turn 1:
+Turn 1 (review leads and verify):
 ```repl
-results = repo.grep("auth")
+print(context)  # See initial leads
+content = repo.read_file("src/middleware/auth.py")  # Verify top lead
 ```
-Output: grep 'auth' matched 4 files: ['src/middleware/auth.py', 'src/models/user.py', 'tests/test_auth.py', 'config/auth.yaml']
-  src/middleware/auth.py: ['def authenticate(request):']
-  src/models/user.py: ['class AuthUser:']
-Next step: use repo.read_file() on these files, then call FINAL().
 
-Turn 2:
+Turn 2 (expand with semantic search):
 ```repl
-content = repo.read_file("src/middleware/auth.py")
+symbols = repo.find_symbols("Auth")
 ```
-Output: === src/middleware/auth.py (800 chars) === def authenticate(request): ...
+Output: find_symbols 'Auth' found 3 symbols:
+  Struct AuthMiddleware in src/middleware/auth.py:15
+  Function authenticate in src/middleware/auth.py:42
+  Struct AuthUser in src/models/user.py:8
 
 Turn 3:
-FINAL({"relevant_files": ["src/middleware/auth.py", "src/models/user.py"], "reasoning": "Auth middleware and user model"})
+FINAL({"relevant_files": ["src/middleware/auth.py", "src/models/user.py"], "reasoning": "Auth middleware and user model found via LSP"})
 
-=== EXAMPLE 2: Architecture question (workspace repo) ===
+=== EXAMPLE 2: Architecture question ===
 
 User query: "How is the project structured?"
 
 Turn 1:
 ```repl
-tree = repo.get_tree()
+entries = repo.entry_points()
+print(entries)
 ```
-Output: Repo tree (5 top-level entries):
-  Cargo.toml
-  crates/: ['app-auth', 'app-core', 'app-db']
-  scripts/: ['deploy.sh']
-  tests/: ['integration']
+Output: Entry points: ['crates/app-core/src/lib.rs', 'crates/app-auth/src/lib.rs', 'crates/app-db/src/lib.rs', 'Cargo.toml']
 
 Turn 2:
 ```repl
-files = repo.list_files()
+syms = repo.doc_symbols("crates/app-core/src/lib.rs")
 ```
-Output: Found 200 files. First 50: ['crates/app-core/src/lib.rs', 'crates/app-core/src/config.rs', 'crates/app-auth/src/lib.rs', 'crates/app-auth/src/middleware.rs', 'crates/app-db/src/lib.rs', ...]
-
-Use EXACT paths from list_files() output. Do NOT guess paths like 'src/lib.rs'.
+Output: doc_symbols found 8 symbols in crates/app-core/src/lib.rs:
+  Module config, Module db, Module handlers, Struct AppState, Function init
 
 Turn 3:
-```repl
-content = repo.read_file("crates/app-core/src/lib.rs")
-```
-Output: === crates/app-core/src/lib.rs (500 chars) === pub mod config; pub mod db; ...
-
-Turn 4:
-```repl
-content2 = repo.read_file("crates/app-auth/src/lib.rs")
-```
-Output: === crates/app-auth/src/lib.rs (300 chars) === pub mod middleware; pub mod jwt; ...
-
-Turn 5:
-FINAL({"relevant_files": ["crates/app-core/src/lib.rs", "crates/app-auth/src/lib.rs", "crates/app-db/src/lib.rs", "Cargo.toml"], "reasoning": "Entry point lib.rs from each crate shows module structure; Cargo.toml defines workspace"})
+FINAL({"relevant_files": ["crates/app-core/src/lib.rs", "crates/app-auth/src/lib.rs", "crates/app-db/src/lib.rs", "Cargo.toml"], "reasoning": "Entry point lib.rs from each crate; Cargo.toml defines workspace"})
 """
 
 
@@ -130,7 +117,47 @@ from types import SimpleNamespace
 sys.path.insert(0, '{repo_root_escaped}')
 
 from rlmgw.repo_env import RepoContextTools
+from rlmgw.repo_context import RepoContextCollector
 base_repo = RepoContextTools('{repo_root_escaped}')
+base_collector = RepoContextCollector('{repo_root_escaped}')
+
+# Reuse the already-initialized LSP manager (same process, shared via registry)
+lsp_mgr = None
+try:
+    from rlmgw.lsp_client import get_shared_lsp, LSPManager
+    lsp_mgr = get_shared_lsp('{repo_root_escaped}')
+    if lsp_mgr is None:
+        lsp_mgr = LSPManager('{repo_root_escaped}')
+        lsp_mgr.initialize(timeout_per_server=90)
+    if not lsp_mgr.available:
+        lsp_mgr = None
+except Exception:
+    lsp_mgr = None
+
+def repo_find_symbols(query):
+    if lsp_mgr is None:
+        print("LSP not available. Use repo.grep() instead.")
+        return []
+    symbols = lsp_mgr.workspace_symbol(query)
+    print(f"find_symbols '{{query}}' found {{len(symbols)}} symbols:")
+    for s in symbols[:15]:
+        print(f"  {{s.kind_name}} {{s.name}} in {{s.file_path}}:{{s.line}}")
+    return symbols
+
+def repo_entry_points():
+    result = base_collector.find_entry_points()
+    print(f"Entry points: {{result[:30]}}")
+    return result
+
+def repo_doc_symbols(path):
+    if lsp_mgr is None:
+        print("LSP not available.")
+        return []
+    symbols = lsp_mgr.document_symbols(path)
+    print(f"doc_symbols found {{len(symbols)}} symbols in {{path}}:")
+    for s in symbols[:20]:
+        print(f"  {{s.kind_name}} {{s.name}}")
+    return symbols
 
 def repo_list_files(extensions=None):
     result = base_repo.list_files(extensions)
@@ -154,7 +181,6 @@ def repo_read_file(path):
         print(result[:3000])
     else:
         print(f"ERROR: File not found: {{path}}")
-        # Show actual files that partially match to help the model recover
         partial = path.rsplit("/", 1)[-1]
         matches = [f for f in base_repo.list_files() if partial in f][:5]
         if matches:
@@ -178,6 +204,9 @@ def repo_get_tree():
     return result
 
 repo = SimpleNamespace(
+    find_symbols=repo_find_symbols,
+    entry_points=repo_entry_points,
+    doc_symbols=repo_doc_symbols,
     list_files=repo_list_files,
     grep=repo_grep,
     read_file=repo_read_file,
@@ -217,11 +246,10 @@ repo = SimpleNamespace(
                 custom_user_prompt=(
                     'Find source files for: "{root_prompt}"\n'
                     "Iteration {iteration}. "
-                    "Step 1: grep for key terms. "
-                    "Step 2: read found files with repo.read_file(). "
-                    "Step 3: call FINAL() with the files. "
-                    "Do NOT repeat a grep you already ran. "
-                    "Do NOT inspect the `context` variable. "
+                    "Step 1: review INITIAL LEADS in context, verify with repo.read_file(). "
+                    "Step 2: use repo.find_symbols() for semantic search. "
+                    "Step 3: call FINAL() with verified files. "
+                    "Do NOT repeat a search you already ran. "
                     "Your next ```repl``` code block:"
                 ),
                 verbose=False,
@@ -233,55 +261,85 @@ repo = SimpleNamespace(
             self.rlm = None
 
     def build_from_query(self, query: str) -> ContextPack:
-        """Build context pack using neuro-symbolic pipeline.
+        """Build context pack using combined symbolic + RLM pipeline.
 
-        Pipeline: symbolic retrieval → neural reranking → symbolic assembly.
-        Falls back to pure RLM exploration, then keyword search.
+        1. Pre-compute symbolic candidates (LSP, entry points, grep) and classify query
+        2. Inject seed candidates into RLM REPL context
+        3. RLM explores with LSP-powered tools, starting from strong initial leads
+        4. If RLM fails, fall back to the pre-computed symbolic results (zero extra cost)
         """
-        # Primary path: neuro-symbolic pipeline
+        # Step 1: Symbolic pre-computation (fast, deterministic)
+        query_type = "specific"
+        seed_candidates: list[tuple[str, str]] = []
         try:
-            result = self._build_with_symbolic_pipeline(query)
-            if result.relevant_files:
-                return result
+            query_type = self._classify_query(query)
+            seed_candidates = self._symbolic_retrieve(query, query_type)
+            logger.info(
+                f"Pre-computed {len(seed_candidates)} seed candidates (query_type={query_type})"
+            )
         except Exception as e:
-            logger.warning(f"Symbolic pipeline failed: {e}")
+            logger.warning(f"Symbolic pre-computation failed: {e}")
 
-        # Secondary path: RLM REPL exploration
+        # Step 2: RLM exploration with enhanced tools + seed data
         try:
-            return self._build_with_rlm(query)
+            return self._build_with_rlm(query, seed_candidates, query_type)
         except Exception as e:
-            logger.warning(f"RLM-based selection failed: {e}. Falling back to simple selection.")
-            return self._build_simple(query)
+            logger.warning(f"RLM exploration failed: {e}")
 
-    def _build_with_rlm(self, query: str) -> ContextPack:
-        """Use RLM to intelligently select context."""
+        # Step 3: Fall back to neural reranking of pre-computed seeds
+        if seed_candidates:
+            try:
+                ranked = self._neural_rerank(query, seed_candidates, query_type)
+                if ranked:
+                    logger.info(f"Falling back to seed reranking: {len(ranked)} files")
+                    return self._build_context_pack(ranked)
+            except Exception as e:
+                logger.warning(f"Neural reranking failed: {e}")
+
+        # Step 4: Last resort — simple keyword search
+        return self._build_simple(query)
+
+    def _build_with_rlm(
+        self,
+        query: str,
+        seed_candidates: list[tuple[str, str]] | None = None,
+        query_type: str = "specific",
+    ) -> ContextPack:
+        """Use RLM to explore with LSP-enhanced tools, starting from seed candidates."""
         self._initialize_rlm()
 
         if self.rlm is None:
             raise Exception("RLM not available")
 
-        # This string becomes the `context` variable in the REPL.
-        # The default user prompt tells the model to "use the context variable" — and
-        # it WILL inspect it. So we pre-populate it with useful data: the query + repo
-        # tree summary. This way, when the model does print(context), it gets useful
-        # data that guides its next grep/read_file calls.
+        # Build seed data summary for the context variable
         try:
             tree = self.repo_collector.get_repo_tree()
             tree_summary = ", ".join(sorted(tree.keys())[:30])
         except Exception:
             tree_summary = "(tree unavailable)"
 
+        # Format seed candidates as initial leads
+        leads_text = ""
+        if seed_candidates:
+            lead_paths = [c[0] for c in seed_candidates[:15]]
+            leads_text = (
+                "\n\nINITIAL LEADS (pre-computed, verify with repo.read_file()):\n"
+                + "\n".join(f"  - {p}" for p in lead_paths)
+            )
+
         selection_query = f"""=== TASK: Find source files relevant to this query ===
 QUERY: {query}
+TYPE: {query_type}
 
-REPO STRUCTURE (top-level): {tree_summary}
+REPO STRUCTURE (top-level): {tree_summary}{leads_text}
 
 INSTRUCTIONS:
-1. Use repo.grep("pattern") to search for key terms from the query
-2. Use repo.read_file("path") to verify promising files
-3. When done, call FINAL({{"relevant_files": ["path/to/file"], "reasoning": "..."}})
+1. Review the INITIAL LEADS above — verify the best ones with repo.read_file()
+2. Use repo.find_symbols("term") for semantic code search (better than grep)
+3. Select 3-10 files maximum. Quality over quantity.
+4. When confident, call FINAL({{"relevant_files": ["path/to/file"], "reasoning": "..."}})
 
-Available tools: repo.grep(pattern), repo.list_files(), repo.read_file(path), repo.get_tree()
+Available tools: repo.find_symbols(query), repo.entry_points(), repo.doc_symbols(path), repo.grep(pattern), repo.read_file(path), repo.list_files()
 Prioritize source code (.rs, .py, .ts, .go) over docs/configs/tests.
 """
 
@@ -289,64 +347,105 @@ Prioritize source code (.rs, .py, .ts, .go) over docs/configs/tests.
         logger.info(f"Running RLM context selection for query: {query[:100]}")
         result = self.rlm.completion(selection_query, root_prompt=query)
 
-        # find_final_answer() returns tuple (type, content) when FINAL() is used,
-        # or _default_answer() returns a raw string when iterations exhaust
-        response_text = result.response
+        # Parse the RLM response into a file list
+        relevant_files = self._parse_rlm_response(result.response, query)
+
+        if not relevant_files:
+            raise ValueError("RLM returned no files")
+
+        # Quality gate: catch noisy "dump everything" results
+        relevant_files = self._quality_gate(relevant_files, seed_candidates, query_type)
+        logger.info(f"RLM final selection: {len(relevant_files)} files after quality gate")
+
+        return self._build_context_pack(relevant_files)
+
+    def _parse_rlm_response(self, response, query: str) -> list[str]:
+        """Extract file list from RLM response (JSON, regex, or text extraction)."""
+        response_text = response
         logger.debug(
-            f"RLM raw response type={type(response_text).__name__}: {repr(str(response_text))[:500]}"
+            f"RLM raw response type={type(response_text).__name__}: "
+            f"{repr(str(response_text))[:500]}"
         )
         if isinstance(response_text, tuple):
             response_text = response_text[1]  # Extract content from ("FINAL", content)
 
-        # Parse RLM's selection
+        # Try 1: direct JSON parse
         try:
             selection_data = json.loads(response_text)
             relevant_files = selection_data.get("relevant_files", [])
             reasoning = selection_data.get("reasoning", "")
-
             logger.info(f"RLM selected {len(relevant_files)} files: {reasoning}")
-
-            return self._build_context_pack(relevant_files)
+            return relevant_files
         except (json.JSONDecodeError, TypeError):
-            # Try to extract JSON from surrounding prose
-            json_match = re.search(
-                r'\{[^{}]*"relevant_files"\s*:\s*\[.*?\][^{}]*\}',
-                str(response_text),
-                re.DOTALL,
-            )
-            if json_match:
-                try:
-                    selection_data = json.loads(json_match.group())
-                    relevant_files = selection_data.get("relevant_files", [])
-                    reasoning = selection_data.get("reasoning", "")
-                    logger.info(
-                        f"RLM selected {len(relevant_files)} files (extracted from text): {reasoning}"
-                    )
-                    return self._build_context_pack(relevant_files)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            # Last resort: extract file paths from REPL output/response text.
-            # The RLM may have explored files but never produced FINAL() JSON.
-            files_from_text = self._extract_file_paths_from_text(str(response_text), query)
-            if files_from_text:
-                # If text extraction found very few files, supplement with keyword search
-                # to ensure we don't miss the primary target file
-                if len(files_from_text) < 3:
-                    simple_files = self._find_relevant_files(self._extract_keywords(query))
-                    seen = set(files_from_text)
-                    for f in simple_files:
-                        if f not in seen:
-                            files_from_text.append(f)
-                            seen.add(f)
-                            if len(files_from_text) >= 10:
-                                break
-                logger.info(
-                    f"RLM selected {len(files_from_text)} files (extracted paths from text)"
-                )
-                return self._build_context_pack(relevant_files=files_from_text)
+            pass
 
-            logger.warning("RLM didn't return valid JSON. Falling back to simple selection.")
-            return self._build_simple(query)
+        # Try 2: extract JSON from surrounding prose
+        json_match = re.search(
+            r'\{[^{}]*"relevant_files"\s*:\s*\[.*?\][^{}]*\}',
+            str(response_text),
+            re.DOTALL,
+        )
+        if json_match:
+            try:
+                selection_data = json.loads(json_match.group())
+                relevant_files = selection_data.get("relevant_files", [])
+                reasoning = selection_data.get("reasoning", "")
+                logger.info(
+                    f"RLM selected {len(relevant_files)} files (extracted from text): {reasoning}"
+                )
+                return relevant_files
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Try 3: extract file paths from REPL output/response text
+        files_from_text = self._extract_file_paths_from_text(str(response_text), query)
+        if files_from_text:
+            logger.info(f"RLM selected {len(files_from_text)} files (extracted paths from text)")
+            return files_from_text
+
+        return []
+
+    def _quality_gate(
+        self,
+        rlm_files: list[str],
+        seed_candidates: list[tuple[str, str]] | None,
+        query_type: str,
+    ) -> list[str]:
+        """Filter noisy RLM results using seed candidates as quality signal.
+
+        When the RLM dumps >10 files (a common failure mode for small models),
+        boost files that overlap with pre-computed seeds and cap the count.
+        If no overlap exists at all, raise to trigger neural reranking fallback.
+        """
+        max_files = 15 if query_type == "architecture" else 10
+
+        if len(rlm_files) <= max_files:
+            return rlm_files  # Selective enough, trust the RLM
+
+        logger.info(f"Quality gate: RLM returned {len(rlm_files)} files (>{max_files}), filtering")
+
+        if not seed_candidates:
+            return rlm_files[:max_files]
+
+        seed_paths = {c[0] for c in seed_candidates}
+        overlap = [f for f in rlm_files if f in seed_paths]
+        rlm_only = [f for f in rlm_files if f not in seed_paths]
+
+        if not overlap:
+            # RLM went completely off track — no overlap with pre-computed seeds.
+            # Raise to fall through to neural reranking of seeds.
+            raise ValueError(
+                f"RLM returned {len(rlm_files)} files with zero seed overlap — "
+                "falling back to seed reranking"
+            )
+
+        # Combine: seed-validated files first, then RLM discoveries
+        result = overlap + rlm_only
+        logger.info(
+            f"Quality gate: {len(overlap)} seed-validated + "
+            f"{min(len(rlm_only), max_files - len(overlap))} RLM discoveries"
+        )
+        return result[:max_files]
 
     # ── Neuro-symbolic pipeline ──────────────────────────────────────────
 
@@ -414,11 +513,13 @@ Prioritize source code (.rs, .py, .ts, .go) over docs/configs/tests.
             return "specific"
 
     def _get_lsp(self):
-        """Lazily initialize LSP manager."""
+        """Lazily initialize LSP manager and register it for REPL reuse."""
         if self._lsp is None:
-            from .lsp_client import LSPManager
+            from .lsp_client import LSPManager, _lsp_registry
 
             self._lsp = LSPManager(str(self.repo_collector.repo_root))
+            # Register so REPL setup code reuses this instance (same process)
+            _lsp_registry[self._lsp.repo_root] = self._lsp
         return self._lsp
 
     def _symbolic_retrieve(self, query: str, query_type: str) -> list[tuple[str, str]]:
